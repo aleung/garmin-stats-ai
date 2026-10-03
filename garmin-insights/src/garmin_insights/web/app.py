@@ -1311,6 +1311,10 @@ async def scale_frames(req: ScaleFramesRequest):
         else:
             note = "Impedance or profile values are out of the plausible range — weight and BMI only."
 
+    if composition:
+        from garmin_insights.scales.standards import enrich
+
+        comp_extras = enrich(composition, comp_extras, reading.weight_kg, height_cm, sex, age)
     extras = {**dict(reading.extras), **comp_extras, "variant": reading.variant}
     raw_frames_hex = "\n".join(f.hex() for f in session["frames"])
     taken_at = datetime.now().isoformat(timespec="seconds")
@@ -1372,6 +1376,21 @@ async def scale_readings(
     readings = await loop.run_in_executor(
         None, bundle.agent._memory.get_scale_readings, s, e
     )
+    # Ratings are derived, not stored, so older scans get them too. Uses the
+    # user's current age — fine for Low/Standard/High context.
+    from garmin_insights.scales.standards import enrich
+
+    identity = _resolve_user_identity(bundle.agent._settings)
+    try:
+        height_cm = float(identity.get("height_cm") or 0) or None
+    except (TypeError, ValueError):
+        height_cm = None
+    for r in readings:
+        metrics = {k: r.get(k) for k in ("bmi", "body_fat_pct", "body_water_pct",
+                                         "muscle_mass_kg", "visceral_fat", "metabolic_age")
+                   if r.get(k) is not None}
+        r["extras"] = enrich(metrics, r.get("extras") or {}, r["weight_kg"], height_cm,
+                             identity.get("biological_sex"), identity.get("age"))
     return {"readings": readings, "date_range": {"start": s, "end": e}}
 
 

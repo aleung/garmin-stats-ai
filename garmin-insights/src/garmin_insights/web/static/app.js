@@ -1557,9 +1557,9 @@ function renderScaleSegments(readings) {
     ['left_arm', 'Left arm', '#60a5fa'], ['right_arm', 'Right arm', '#a78bfa'],
     ['trunk', 'Trunk', '#fbbf24'], ['left_leg', 'Left leg', '#34d399'], ['right_leg', 'Right leg', '#f472b6'],
   ];
-  for (const [sectionId, canvasId, key, field] of [
-    ['scale-seg-muscle-section', 'scale-seg-muscle-chart', 'scaleSegMuscle', 'muscle_pct'],
-    ['scale-seg-fat-section', 'scale-seg-fat-chart', 'scaleSegFat', 'fat_pct'],
+  for (const [sectionId, canvasId, key, field, ratingField] of [
+    ['scale-seg-muscle-section', 'scale-seg-muscle-chart', 'scaleSegMuscle', 'muscle_pct', 'muscle_rating'],
+    ['scale-seg-fat-section', 'scale-seg-fat-chart', 'scaleSegFat', 'fat_pct', 'fat_rating'],
   ]) {
     const section = document.getElementById(sectionId);
     if (!section) continue;
@@ -1581,9 +1581,35 @@ function renderScaleSegments(readings) {
         responsive: true, maintainAspectRatio: false,
         interaction: { mode: 'index', intersect: false },
         scales: { x: commonScales().x, y: commonScales('% of standard').y },
+        plugins: {
+          ...commonPlugins(),
+          tooltip: {
+            ...(commonPlugins().tooltip || {}),
+            callbacks: {
+              label: (c) => {
+                const seg = segs[c.datasetIndex][0];
+                const rating = data[c.dataIndex].extras.segments?.[seg]?.[ratingField];
+                return `${c.dataset.label}: ${c.parsed.y?.toFixed(1)}%${rating ? ` (${rating})` : ''}`;
+              },
+            },
+          },
+        },
       },
     });
   }
+}
+
+// Latest reading's Fitdays-style ratings, as chips under the Scale Detail chart.
+function renderScaleRatings(readings) {
+  const el = document.getElementById('scale-ratings');
+  if (!el) return;
+  const latest = [...(readings || [])].reverse().find(r => r.extras?.ratings);
+  const labels = Object.fromEntries(Object.entries(_SCAN_RATING_KEYS).map(([l, k]) => [k, l]));
+  const ratings = latest?.extras?.ratings || {};
+  el.innerHTML = Object.keys(ratings).length
+    ? `<small>Latest (${(latest.taken_at || latest.date || '').slice(0, 10)}):</small> ` +
+      Object.entries(ratings).map(([k, r]) => `<span class="scale-rating-item">${labels[k] || k}${_ratingChip(r)}</span>`).join('')
+    : '';
 }
 
 function renderScaleDetail(readings) {
@@ -1596,6 +1622,7 @@ function renderScaleDetail(readings) {
   if (data.length === 0) { section.style.display = 'none'; return; }
   section.style.display = '';
 
+  renderScaleRatings(readings);
   const ctx = document.getElementById('scale-detail-chart');
   if (!ctx) return;
   const labels = data.map(r => (r.date || r.taken_at || '').slice(5, 10));
@@ -5360,6 +5387,7 @@ const _SCAN_ROWS = [
   ['Fat mass', (m, x) => x.fat_mass_kg, 'kg', 2, true],
   ['Fat-free mass', (m, x) => x.fat_free_mass_kg, 'kg', 2, true],
   ['Muscle mass', m => m.muscle_mass_kg, 'kg', 2, false],
+  ['Muscle rate', (m, x) => x.muscle_rate_pct, '%', 1, true],
   ['Skeletal muscle', (m, x) => x.skeletal_muscle_pct, '%', 1, true],
   ['Body water', m => m.body_water_pct, '%', 1, false],
   ['Protein', (m, x) => x.protein_pct, '%', 1, true],
@@ -5370,11 +5398,23 @@ const _SCAN_ROWS = [
   ['Metabolic age', m => m.metabolic_age, 'yrs', 0, false],
   ['Body score', (m, x) => x.body_score, '/100', 0, true],
   ['Body type', (m, x) => x.body_type, '', 0, true],
+  ['Ideal weight', (m, x) => x.ideal_weight_kg, 'kg', 1, true],
 ];
 const _SCAN_LIMBS = [
   ['left_arm', 'Left arm'], ['right_arm', 'Right arm'], ['trunk', 'Trunk'],
   ['left_leg', 'Left leg'], ['right_leg', 'Right leg'],
 ];
+
+// Row label -> key in extras.ratings (Fitdays-style Low/Standard/High).
+const _SCAN_RATING_KEYS = {
+  'BMI': 'bmi', 'Body fat': 'body_fat_pct', 'Muscle rate': 'muscle_rate_pct',
+  'Skeletal muscle': 'skeletal_muscle_pct', 'Body water': 'body_water_pct',
+  'Protein': 'protein_pct', 'Subcutaneous fat': 'subcutaneous_fat_pct',
+  'Visceral fat': 'visceral_fat', 'Metabolic age': 'metabolic_age',
+};
+function _ratingChip(r) {
+  return r ? ` <span class="scan-rating scan-rating-${r.toLowerCase()}">${r}</span>` : '';
+}
 
 function hideScanResults() {
   document.getElementById('scan-results')?.setAttribute('hidden', '');
@@ -5394,7 +5434,8 @@ function renderScanResults(result) {
   document.getElementById('scan-results-grid').innerHTML = rows.map(
     ([label, v, unit, dp, localOnly]) =>
       `<div class="scan-row${localOnly ? ' is-local' : ''}"><span>${label}</span>` +
-      `<b>${Number(v).toFixed(dp)}${unit ? ` ${unit}` : ''}</b>` +
+      `<b>${Number(v).toFixed(dp)}${unit ? ` ${unit}` : ''}` +
+      `${_ratingChip((x.ratings || {})[_SCAN_RATING_KEYS[label]])}</b>` +
       `${localOnly ? '<span class="scan-local-tag">local</span>' : ''}</div>`
   ).join('');
 
@@ -5404,10 +5445,11 @@ function renderScanResults(result) {
     '<table><thead><tr><th></th><th>Muscle</th><th>Fat</th></tr></thead><tbody>' +
     limbs.map(([k, label]) => {
       const s = segs[k];
-      const val = (pct, kg) => (pct == null ? '—'
-        : `${Number(pct).toFixed(1)}%${kg != null ? ` <small>(${Number(kg).toFixed(2)} kg)</small>` : ''}`);
-      return `<tr><td>${label}</td><td>${val(s.muscle_pct, s.muscle_mass_kg)}</td>` +
-             `<td>${val(s.fat_pct, s.fat_mass_kg)}</td></tr>`;
+      const val = (pct, kg, r) => (pct == null ? '—'
+        : `${Number(pct).toFixed(1)}%${kg != null ? ` <small>(${Number(kg).toFixed(2)} kg)</small>` : ''}` +
+          _ratingChip(r));
+      return `<tr><td>${label}</td><td>${val(s.muscle_pct, s.muscle_mass_kg, s.muscle_rating)}</td>` +
+             `<td>${val(s.fat_pct, s.fat_mass_kg, s.fat_rating)}</td></tr>`;
     }).join('') + '</tbody></table>'
   ) : '';
 
