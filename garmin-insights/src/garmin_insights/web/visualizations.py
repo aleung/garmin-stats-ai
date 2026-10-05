@@ -50,9 +50,12 @@ class VisualizationService:
         table, col, agg = _INTRADAY_METRICS[metric]
         end = datetime.now().date()
         start = end - timedelta(days=days - 1)
+        # Timestamps are stored in UTC; bucket by the viewer's LOCAL day/hour
+        # via SQLite's 'localtime' modifier (honours the container TZ) so the
+        # hour-of-day heatmap reflects wall-clock time, not UTC.
         sql = f"""
-            SELECT substr(time, 1, 10) AS date,
-                   CAST(substr(time, 12, 2) AS INTEGER) AS hour,
+            SELECT substr(datetime(time, 'localtime'), 1, 10) AS date,
+                   CAST(strftime('%H', time, 'localtime') AS INTEGER) AS hour,
                    {agg}({col}) AS value
             FROM {table}
             WHERE time >= ? AND time <= ? AND {col} IS NOT NULL AND {col} >= 0
@@ -435,16 +438,18 @@ class VisualizationService:
                 secs = None
             try:
                 # Prefer stored timestamps; fall back to deriving from wake - duration.
+                # Stored UTC -> local wall-clock (honours container TZ) so the
+                # plotted bed/wake hours match the viewer's clock.
                 if r.get("sleep_end") and not str(r["sleep_end"]) in ("", "None", "nan"):
-                    wake_dt = datetime.fromisoformat(str(r["sleep_end"]).replace("Z", "").split(".")[0])
+                    wake_dt = datetime.fromisoformat(str(r["sleep_end"])).astimezone()
                 else:
                     t = r["time"]
                     if not t or not secs:
                         continue
-                    wake_dt = datetime.fromisoformat(str(t).replace("Z", "").split(".")[0])
+                    wake_dt = datetime.fromisoformat(str(t)).astimezone()
 
                 if r.get("sleep_start") and not str(r["sleep_start"]) in ("", "None", "nan"):
-                    bed_dt = datetime.fromisoformat(str(r["sleep_start"]).replace("Z", "").split(".")[0])
+                    bed_dt = datetime.fromisoformat(str(r["sleep_start"])).astimezone()
                 elif secs:
                     bed_dt = wake_dt - timedelta(seconds=int(secs))
                 else:

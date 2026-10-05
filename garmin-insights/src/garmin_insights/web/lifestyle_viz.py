@@ -990,9 +990,10 @@ class LifestyleService:
     # 18. Stress hour-of-day fingerprint
     # ------------------------------------------------------------------
     def stress_hour_fingerprint(self, start: str, end: str) -> dict:
+        # UTC -> local day/hour so the fingerprint reflects wall-clock time.
         sql = """
-            SELECT substr(time, 1, 10) AS date,
-                   CAST(substr(time, 12, 2) AS INTEGER) AS hour,
+            SELECT substr(datetime(time, 'localtime'), 1, 10) AS date,
+                   CAST(strftime('%H', time, 'localtime') AS INTEGER) AS hour,
                    AVG(stress_level) AS stress
             FROM stress_intraday
             WHERE time >= ? AND time <= ? AND stress_level IS NOT NULL AND stress_level >= 0
