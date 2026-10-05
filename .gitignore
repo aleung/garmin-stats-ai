@@ -49,3 +49,8 @@ Thumbs.db
 # Proprietary vendor binaries (e.g. Fitdays libICBodyFatAlgorithms.so) — never commit
 vendor/
 *.so
+
+# Docker runtime data (bind-mounted volumes) — contains live Garmin OAuth
+# tokens and the SQLite DB. Never commit.
+tokens/
+data/

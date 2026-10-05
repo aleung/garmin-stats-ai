@@ -1,0 +1,18 @@
+# Keep the build context small and avoid baking secrets/data into the image.
+.git
+.github
+data
+tokens
+*.db
+*.db-wal
+*.db-shm
+.env
+users/*.env
+**/__pycache__
+**/*.pyc
+.venv
+**/.venv
+**/.pytest_cache
+*.md
+docs
+deploy

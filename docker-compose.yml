@@ -1,0 +1,64 @@
+# Single-user setup: one fetcher (writes the SQLite DB) + one web app (reads it).
+# Both run from the same image and share the ./data volume where garmin.db lives.
+#
+# Before `docker compose up`:
+#   1. cp .env.example .env   and fill in Garmin creds + ANTHROPIC_API_KEY
+#   2. mkdir -p data tokens
+#
+# The DB file ends up on the host at:  ./data/garmin.db
+# (i.e. /root/garmin-stats-ai/data/garmin.db)
+
+services:
+  # Polls Garmin Connect on a loop and writes health data into the shared DB.
+  fetcher:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: garmin-stats-ai:latest
+    container_name: garmin-fetcher
+    # Matches the systemd unit: run the fetch module as __main__ (its logic
+    # runs at import time under that name).
+    command: ["python", "-m", "garmin_grafana.garmin_fetch"]
+    env_file:
+      - .env
+    environment:
+      # Both apps agree on this path inside the container.
+      SQLITE_DB_PATH: /data/garmin.db
+      # Persist the Garmin OAuth token so we don't re-login every restart.
+      TOKEN_DIR: /tokens
+    volumes:
+      - ./data:/data
+      - ./tokens:/tokens
+    restart: unless-stopped
+
+  # FastAPI dashboard + Claude chat. Reads the same DB the fetcher writes.
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: garmin-stats-ai:latest
+    container_name: garmin-web
+    command: ["garmin-insights", "web"]
+    env_file:
+      - .env
+    environment:
+      SQLITE_DB_PATH: /data/garmin.db
+      TOKEN_DIR: /tokens
+      # Bind inside the container to all interfaces; the host port mapping
+      # below controls external exposure.
+      WEB_HOST: 0.0.0.0
+      WEB_PORT: "8080"
+      # Local timezone for display (Montreal = Eastern). Fixes dashboard
+      # day-bucketing which otherwise uses the container's UTC clock.
+      TZ: America/Toronto
+      # Leave USERS unset -> single-user mode: the "default" user uses
+      # SQLITE_DB_PATH above (see garmin-insights config.py).
+    ports:
+      # host:container. Host 8090 (8080 is taken by searxng); container stays 8080.
+      - "8090:8080"
+    volumes:
+      - ./data:/data
+      - ./tokens:/tokens
+    depends_on:
+      - fetcher
+    restart: unless-stopped
