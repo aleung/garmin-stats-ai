@@ -54,3 +54,6 @@ vendor/
 # tokens and the SQLite DB. Never commit.
 tokens/
 data/
+
+# DB snapshot served over Tailscale — full copy of health data, never commit
+export/

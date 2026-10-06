@@ -246,3 +246,117 @@ be removed.
 | `data/garmin.db` never appears | Fetcher never completed a successful sync — check its logs for login errors. |
 | Can't reach `:8090` | Container not up, firewall, or port conflict. Check `docker compose ps` and `ss -ltnp \| grep 8090`. |
 | Port 8090 also taken | Edit the `ports:` mapping in `docker-compose.yml` to a free host port. |
+
+---
+
+## 7. Read-only DB snapshot over Tailscale (external access)
+
+A second machine (`muse`) needs read-only access to `garmin.db` **without SSH**.
+This is done with two extra services plus a host-level Tailscale node — the
+remote only ever fetches a consistent, at-most-1-hour-old snapshot over HTTP.
+
+### How it works
+
+```
+fetcher ──writes──► data/garmin.db  (WAL mode, live)
+                          │
+         db-export ──VACUUM INTO (hourly)──► export/garmin_export.db  (clean single file)
+                          │
+         db-serve (busybox httpd) ──serves /export──► http://docker-lxc:18080/garmin_export.db
+                          │
+                   Tailscale (tag:docker) ──ACL: only tag:muse → tcp:18080──► muse
+```
+
+- **`db-export`** — reuses the `garmin-stats-ai:latest` image (it has python+sqlite3).
+  Every `INTERVAL_SECONDS` (default 3600) it runs `VACUUM INTO` to produce a
+  **consistent** single-file snapshot at `export/garmin_export.db`, written to a
+  temp file then atomically `mv`'d into place. `VACUUM INTO` is required because
+  the live DB is in **WAL mode**: a plain copy of `garmin.db` would miss whatever
+  is still in `-wal`, and the snapshot is a normal `journal_mode=delete` DB that
+  the client opens with no `-wal`/`-shm` needed.
+- **`db-serve`** — `busybox:1.36` httpd serving **only** the `./export` dir.
+  ~0.5 MB RSS. No directory listing (`GET /` returns 404); the file is reachable
+  only by its exact name `garmin_export.db`.
+- **Host Tailscale node** — Tailscale runs on the docker LXC host (not in a
+  container), advertising `tag:docker`. The httpd port is bound to the host's
+  **Tailscale IP only** (`${DB_SERVE_BIND_IP}:18080:18080`), so it is not reachable
+  from LAN/public even if ACLs change (defense in depth).
+
+### Compose services (appended to `docker-compose.yml`)
+
+```yaml
+  db-export:
+    image: garmin-stats-ai:latest
+    container_name: garmin-db-export
+    entrypoint: ["/bin/sh", "/app/export_db.sh"]
+    environment:
+      SRC: /data/garmin.db
+      DST: /export/garmin_export.db
+      INTERVAL_SECONDS: "3600"
+    volumes:
+      - ./data:/data            # must be read-write: WAL-mode DB can't be
+                                # opened from a :ro mount (needs -wal/-shm)
+      - ./export:/export
+      - ./deploy/export_db.sh:/app/export_db.sh:ro
+    mem_limit: 128m
+    restart: unless-stopped
+
+  db-serve:
+    image: busybox:1.36
+    container_name: garmin-db-serve
+    command: ["httpd", "-f", "-v", "-h", "/export", "-p", "18080"]
+    volumes:
+      - ./export:/export:ro
+    ports:
+      - "${DB_SERVE_BIND_IP}:18080:18080"   # bind to Tailscale IP only
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 32m
+    depends_on:
+      - db-export
+    restart: unless-stopped
+```
+
+The export loop lives in `deploy/export_db.sh` (mounted into `db-export`).
+
+### Why `/data` is read-write for `db-export`
+
+WAL-mode SQLite **cannot open a database on a read-only mount** — it needs to
+create/touch the `-wal` and `-shm` sidecar files. A `:ro` mount fails with
+`unable to open database file`. The container only ever runs `VACUUM INTO`
+(logically read-only on the source) and the script issues no writes to it.
+
+### Operate
+
+```bash
+# bring the two services up
+docker compose up -d db-export db-serve
+
+# check the latest export happened
+docker logs garmin-db-export | tail
+
+# the snapshot the client fetches
+ls -l export/garmin_export.db
+```
+
+### Client (muse) usage
+
+```bash
+# MagicDNS name is stable across IP changes; 18080 is the only allowed port
+curl -fsS -o garmin.db http://docker-lxc:18080/garmin_export.db
+sqlite3 garmin.db "PRAGMA integrity_check;"   # expect: ok
+```
+
+- Freshness: at most 1 hour old (hourly export).
+- The remote must be on Tailscale with `tag:muse`; the ACL grant allows only
+  `tag:muse → tag:docker : tcp:18080` (no SSH, no other ports/hosts).
+
+### Troubleshooting
+
+| Symptom | Likely cause / fix |
+|---------|--------------------|
+| `db-export` logs `unable to open database file` | `/data` mounted `:ro` — change to `./data:/data` (WAL needs write access to sidecar files). |
+| `GET /` returns 404 | Expected — no directory listing. Use the exact path `/garmin_export.db`. |
+| Client can't reach `:18080` | muse not on Tailscale, missing `tag:muse`, or ACL grant not saved. Verify `tailscale status`. |
+| `export/garmin_export.db` missing | First export not done yet or VACUUM failed — check `docker logs garmin-db-export`. |
